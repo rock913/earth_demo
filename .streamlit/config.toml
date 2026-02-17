@@ -1,0 +1,19 @@
+[server]
+address = "0.0.0.0"
+port = 8501
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#00bcd4"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#262730"
+textColor = "#ffffff"
+font = "sans serif"
+
+[secrets]
+# Explicitly avoid relying on $HOME (systemd hardening can make /home inaccessible).
+files = ["/opt/oneearth/.streamlit/secrets.toml"]

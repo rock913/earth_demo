@@ -1,0 +1,40 @@
+[Unit]
+Description=AlphaEarth Streamlit Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alphaearth
+Group=alphaearth
+WorkingDirectory=/opt/oneearth
+
+# Load env vars (optional)
+EnvironmentFile=-/etc/alphaearth/alphaearth.env
+
+# Direct-connect mode: bind Streamlit on all interfaces (public access)
+Environment=HOST=0.0.0.0
+Environment=PORT=8501
+
+# Keep HOME as the service user's real home so Earth Engine can find
+# ~/.config/earthengine/credentials created by `earthengine authenticate`.
+# (Streamlit secrets path is configured via /opt/oneearth/.streamlit/config.toml.)
+Environment=HOME=/home/alphaearth
+Environment=XDG_CONFIG_HOME=/home/alphaearth/.config
+
+ExecStart=/opt/oneearth/run.sh
+Restart=on-failure
+RestartSec=3
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/var/log/alphaearth
+
+StandardOutput=append:/var/log/alphaearth/streamlit.log
+StandardError=append:/var/log/alphaearth/streamlit.log
+
+[Install]
+WantedBy=multi-user.target
