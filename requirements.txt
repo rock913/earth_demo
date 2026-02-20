@@ -1,4 +1,4 @@
-streamlit>=1.31
+streamlit>=1.41,<1.50
 streamlit-folium>=0.18
 earthengine-api>=0.1.391
 geemap>=0.32

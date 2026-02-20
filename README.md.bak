@@ -308,21 +308,3 @@ sudo certbot --nginx -d your.domain.example
 完成后访问：`https://your.domain.example/`
 ```
 # earth_demo
-
-## 📦 批量预热工具
-
-首次部署后，推荐使用批量预热脚本一次性缓存所有 20 个场景（5 城市 × 4 模式）：
-
-```bash
-# 演习模式（先测试）
-sudo bash scripts/batch_preheat_wrapper.sh --dry-run
-
-# 正式预热（10-15 分钟）
-sudo bash scripts/batch_preheat_wrapper.sh
-
-# 强制重新预热（覆盖已存在的缓存）
-sudo bash scripts/batch_preheat_wrapper.sh --force
-```
-
-查看详细说明：[批量预热脚本使用指南](docs/batch_preheat_guide.md)
-

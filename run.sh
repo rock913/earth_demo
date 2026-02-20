@@ -3,6 +3,8 @@ set -euo pipefail
 
 PORT="${PORT:-8501}"
 HOST="${HOST:-0.0.0.0}"
+GEE_USER_PATH="${GEE_USER_PATH:-/mnt/data/hyf/oneearth/aef_demo}"
+export GEE_USER_PATH
 
 if [[ -x "./.venv/bin/python" ]]; then
   exec ./.venv/bin/python -m streamlit run app.py \

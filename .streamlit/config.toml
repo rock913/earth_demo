@@ -14,6 +14,12 @@ secondaryBackgroundColor = "#262730"
 textColor = "#ffffff"
 font = "sans serif"
 
+[theme.sidebar]
+primaryColor = "#00bcd4"
+backgroundColor = "#0b0f13"
+secondaryBackgroundColor = "#161b22"
+textColor = "#EDEDED"
+
 [secrets]
 # Explicitly avoid relying on $HOME (systemd hardening can make /home inaccessible).
 files = ["/opt/oneearth/.streamlit/secrets.toml"]
