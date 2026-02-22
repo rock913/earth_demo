@@ -21,7 +21,10 @@ from collections import OrderedDict
 import httpx
 
 from config import settings
-from llm_service import generate_monitoring_brief_openai_compatible
+from llm_service import (
+    generate_monitoring_brief_openai_compatible,
+    generate_agent_analysis_openai_compatible,
+)
 from gee_service import (
     smart_load,
     get_tile_url,
@@ -79,6 +82,20 @@ class ReportRequest(BaseModel):
     location: Optional[str] = None
 
 
+class AnalyzeRequest(BaseModel):
+    """Agent analysis request.
+
+    If `stats` is provided, the endpoint will NOT require GEE.
+    Otherwise, it will compute stats in the cloud (requires GEE initialized).
+    """
+
+    mission_id: str
+    stats: Optional[Dict[str, Any]] = None
+    # Optional overrides (when computing stats server-side)
+    mode: Optional[str] = None
+    location: Optional[str] = None
+
+
 def _get_mission_by_id(mission_id: str) -> Optional[Dict[str, Any]]:
     for m in settings.missions:
         if m.get("id") == mission_id:
@@ -86,11 +103,55 @@ def _get_mission_by_id(mission_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _render_agent_analysis_template(mission: Dict[str, Any], stats: Dict[str, Any]) -> str:
+    title = mission.get("title", "")
+    narrative = mission.get("narrative", "")
+    formula = mission.get("formula", "")
+    mode_id = mission.get("api_mode", "")
+    location = mission.get("location", "")
+
+    total = stats.get("total_area_km2")
+    anomaly = stats.get("anomaly_area_km2")
+    pct = stats.get("anomaly_pct")
+
+    def _fmt(x: Any) -> str:
+        if x is None:
+            return "—"
+        try:
+            return f"{float(x):.2f}"
+        except Exception:
+            return str(x)
+
+    return (
+        "ONEEARTH/AGENT v6 :: Mission Accepted\n"
+        "----------------------------------------\n\n"
+        "【异动感知 Observation】\n"
+        f"- 任务：{title}\n"
+        f"- 模式：{mode_id}（{formula}）\n"
+        f"- 目标：{location}\n"
+        f"- 统计：总面积 {_fmt(total)} km²；异常面积 {_fmt(anomaly)} km²；异常占比 {_fmt(pct)}%\n\n"
+        "【归因分析 Reasoning】\n"
+        f"- 叙事背景：{narrative}\n"
+        "- 若异常呈连片且跨期稳定，更可能是结构性演变；若呈零散点状，建议优先排查云/阴影/季节扰动。\n"
+        "- 建议结合 Sentinel-2 目视核查，确认边界与成因。\n\n"
+        "【行动规划 Plan】\n"
+        "- ① 将异常占比高的网格列入优先核查清单（按行政/网格编号输出）。\n"
+        "- ② 拉取 Sentinel-2/历史影像做跨期对比，给出‘发生时间窗’与‘扩展方向’。\n"
+        "- ③ 对高风险边界开展抽样外业/第三方数据交叉验证（若条件允许）。\n"
+        "- ④ 将处置动作形成闭环台账：发现→核查→处置→复核。\n\n"
+        "【共识印证 Consensus】\n"
+        "- 本次结果为新闻/叙事提供了可复核的量化证据锚点，可用于对外沟通与跨部门复核。\n"
+        "- 建议明确不确定性来源（季节/云影/尺度），避免把短期视觉变化误判为长期成果或风险。\n"
+    )
+
+
 class MissionCamera(BaseModel):
     lat: float
     lon: float
     height: float
     duration_s: float
+    heading_deg: Optional[float] = None
+    pitch_deg: Optional[float] = None
 
 
 class Mission(BaseModel):
@@ -288,9 +349,9 @@ async def get_modes():
     return settings.modes
 
 
-@app.get("/api/missions", response_model=List[Mission])
+@app.get("/api/missions", response_model=List[Mission], response_model_exclude_none=True)
 async def get_missions():
-    """获取 V5 Missions（任务驱动演示主线）。
+    """获取 V6 Missions（任务驱动演示主线）。
 
     该端点不依赖 GEE 初始化，主要用于前端叙事流程与任务面板渲染。
     """
@@ -318,13 +379,15 @@ async def get_stats(req: StatsRequest):
 
     loc_data = settings.locations[req.location]
     lat, lon, _zoom = loc_data["coords"]
-    viewport = ee.Geometry.Point([lon, lat]).buffer(settings.viewport_buffer_m)
+    buffer_m = settings.get_viewport_buffer_m_for_mode(req.mode)
+    viewport = ee.Geometry.Point([lon, lat]).buffer(buffer_m)
 
     mode_full = settings.modes[req.mode]
     img, _vis_params, _suffix = get_layer_logic(mode_full, viewport)
 
-    # DNA 模式为语义 RGB 可视化，不定义“异常掩膜面积”；其余模式通常通过 updateMask 标记异常。
-    masked_as_anomaly = req.mode != "dna"
+    # Most modes mark "interesting" pixels via updateMask; clustering is categorical and
+    # should not be interpreted as an anomaly mask.
+    masked_as_anomaly = req.mode not in ("ch4_amazon_zeroshot", "ch5_coastline_audit")
     scale_m = int(req.scale_m) if req.scale_m else 30
 
     stats = compute_zonal_stats(
@@ -371,11 +434,14 @@ async def generate_report(req: ReportRequest):
 
         loc_data = settings.locations[location_id]
         lat, lon, _zoom = loc_data["coords"]
-        viewport = ee.Geometry.Point([lon, lat]).buffer(settings.viewport_buffer_m)
+        buffer_m = settings.get_viewport_buffer_m_for_mode(mode_id)
+        viewport = ee.Geometry.Point([lon, lat]).buffer(buffer_m)
 
         mode_full = settings.modes[mode_id]
         img, _vis_params, _suffix = get_layer_logic(mode_full, viewport)
-        masked_as_anomaly = mode_id != "dna"
+        # Most modes mark "interesting" pixels via updateMask; clustering is categorical and
+        # should not be interpreted as an anomaly mask.
+        masked_as_anomaly = mode_id not in ("ch4_amazon_zeroshot",)
         stats = compute_zonal_stats(img, viewport, scale=30, max_pixels=int(1e9), masked_as_anomaly=masked_as_anomaly)
         computed = True
 
@@ -401,6 +467,7 @@ async def generate_report(req: ReportRequest):
         f"算子：{formula}\n"
         f"摘要：{narrative}\n"
         f"统计：总面积 { _fmt(total) } km²；异常面积 { _fmt(anomaly) } km²；异常占比 { _fmt(pct) }%\n"
+        f"【共识印证】在统一表征隐空间中，本次结果提供了可复核的量化证据，用于支撑‘事件叙事’的客观核验。\n"
         f"建议：对异常占比高的网格优先开展核查，结合 Sentinel-2 影像与历史变化趋势形成处置清单。"
     )
 
@@ -449,6 +516,75 @@ async def generate_report(req: ReportRequest):
     }
 
 
+@app.post("/api/analyze")
+async def analyze_mission(req: AnalyzeRequest):
+    """Generate an agent analysis text for the front-end analysis console.
+
+    - If `stats` is provided, works without GEE.
+    - Otherwise computes stats server-side (requires GEE initialized).
+    - If LLM is configured, will try LLM first and fall back to template.
+    """
+
+    mission = _get_mission_by_id(req.mission_id)
+    if not mission:
+        raise HTTPException(status_code=400, detail=f"Unknown mission_id: {req.mission_id}")
+
+    stats = req.stats
+    computed = False
+
+    if stats is None:
+        if not gee_initialized:
+            raise HTTPException(status_code=503, detail="GEE not initialized")
+
+        mode_id = req.mode or mission.get("api_mode")
+        location_id = req.location or mission.get("location")
+
+        if mode_id not in settings.modes:
+            raise HTTPException(status_code=400, detail=f"Invalid mode: {mode_id}")
+        if location_id not in settings.locations:
+            raise HTTPException(status_code=400, detail=f"Invalid location: {location_id}")
+
+        loc_data = settings.locations[location_id]
+        lat, lon, _zoom = loc_data["coords"]
+        buffer_m = settings.get_viewport_buffer_m_for_mode(mode_id)
+        viewport = ee.Geometry.Point([lon, lat]).buffer(buffer_m)
+
+        mode_full = settings.modes[mode_id]
+        img, _vis_params, _suffix = get_layer_logic(mode_full, viewport)
+        masked_as_anomaly = mode_id not in ("ch4_amazon_zeroshot",)
+        stats = compute_zonal_stats(img, viewport, scale=30, max_pixels=int(1e9), masked_as_anomaly=masked_as_anomaly)
+        computed = True
+
+    generated_by = "template"
+    analysis = _render_agent_analysis_template(mission, stats if isinstance(stats, dict) else {})
+
+    if settings.llm_api_key:
+        try:
+            llm_text = await generate_agent_analysis_openai_compatible(
+                base_url=settings.llm_base_url,
+                api_key=settings.llm_api_key,
+                model=settings.llm_model,
+                mission=mission,
+                stats=stats if isinstance(stats, dict) else {},
+                timeout_s=settings.llm_timeout_s,
+                temperature=settings.llm_temperature,
+                max_tokens=max(700, int(settings.llm_max_tokens)),
+            )
+            if llm_text:
+                analysis = llm_text
+                generated_by = "llm"
+        except Exception:
+            analysis = _render_agent_analysis_template(mission, stats if isinstance(stats, dict) else {})
+            generated_by = "template"
+
+    return {
+        "mission_id": req.mission_id,
+        "generated_by": generated_by,
+        "computed": computed,
+        "analysis": analysis,
+    }
+
+
 @app.get("/api/layers")
 async def get_layer(
     request: Request,
@@ -492,7 +628,8 @@ async def get_layer(
         
         # 创建视口区域：用于 filterBounds/mosaic 的空间筛选。
         # buffer 太小会导致缩小视角时只看到一小块区域。
-        viewport = ee.Geometry.Point([lon, lat]).buffer(settings.viewport_buffer_m)
+        buffer_m = settings.get_viewport_buffer_m_for_mode(mode)
+        viewport = ee.Geometry.Point([lon, lat]).buffer(buffer_m)
         
         # 智能加载图层
         layer_img, vis_params, status_html, is_cached, asset_id, raw_img = smart_load(
@@ -508,7 +645,7 @@ async def get_layer(
         tile_url = f"{base_url}/api/tiles/{tile_id}/{{z}}/{{x}}/{{y}}"
         
         # 计算边界框 (基于缓冲区)
-        buffer_km = max(1, int(settings.viewport_buffer_m / 1000))
+        buffer_km = max(1, int(buffer_m / 1000))
         # 简单的边界框计算 (度数转换)
         lat_delta = buffer_km / 111.0  # ~111 km per degree latitude
         lon_delta = buffer_km / (111.0 * abs(lat))  # longitude depends on latitude
@@ -564,7 +701,8 @@ async def export_cache(request: ExportRequest):
         # 获取地点坐标
         loc_data = settings.locations[request.location]
         lat, lon, zoom = loc_data["coords"]
-        viewport = ee.Geometry.Point([lon, lat]).buffer(settings.viewport_buffer_m)
+        buffer_m = settings.get_viewport_buffer_m_for_mode(request.mode)
+        viewport = ee.Geometry.Point([lon, lat]).buffer(buffer_m)
         
         # 转换mode ID为完整名称
         mode_full = settings.modes[request.mode]

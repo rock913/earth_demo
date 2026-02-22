@@ -50,19 +50,19 @@ class TestLocationsEndpoint:
         # API 返回字典格式: {"shanghai": {...}, "xiongan": {...}}
         assert isinstance(data, dict)
         # 验证某个位置存在
-        assert "shanghai" in data
-        shanghai = data["shanghai"]
-        assert "coords" in shanghai
-        assert len(shanghai["coords"]) == 3
+        assert "yuhang" in data
+        yuhang = data["yuhang"]
+        assert "coords" in yuhang
+        assert len(yuhang["coords"]) == 3
     
     def test_get_specific_location(self, test_client):
         """测试获取特定地点"""
-        response = test_client.get("/api/locations/xiongan")
+        response = test_client.get("/api/locations/yuhang")
         assert response.status_code == 200
         data = response.json()
         
-        assert data["code"] == "xiongan"
-        assert "雄安" in data["name"]
+        assert data["code"] == "yuhang"
+        assert "余杭" in data["name"]
     
     def test_get_nonexistent_location(self, test_client):
         """测试获取不存在的地点"""
@@ -81,10 +81,12 @@ class TestModesEndpoint:
         
         # API 返回字典格式: {"dna": "地表 DNA", "change": "..."}
         assert isinstance(data, dict)
-        assert len(data) == 4  # 4 种模式
-        # 验证 DNA 和 change 模式存在
-        assert "dna" in data
-        assert "change" in data
+        assert len(data) == 6  # V6.6 6 章模式
+        # 验证 V6.6 模式存在
+        assert "ch1_yuhang_faceid" in data
+        assert "ch4_amazon_zeroshot" in data
+        assert "ch5_coastline_audit" in data
+        assert "ch6_water_pulse" in data
 
 
 class TestLayerEndpoint:
@@ -112,7 +114,7 @@ class TestLayerEndpoint:
         )
         mock_get_tile.return_value = "https://earthengine.googleapis.com/v1/{z}/{x}/{y}"
         
-        response = test_client.get("/api/layers?mode=change&location=shanghai")
+        response = test_client.get("/api/layers?mode=ch1_yuhang_faceid&location=yuhang")
         assert response.status_code == 200
         
         data = response.json()
@@ -125,7 +127,7 @@ class TestLayerEndpoint:
     
     def test_get_layer_missing_params(self, test_client):
         """测试缺少必需参数"""
-        response = test_client.get("/api/layers?mode=change")
+        response = test_client.get("/api/layers?mode=ch1_yuhang_faceid")
         assert response.status_code == 422  # Validation error
     
     @patch('main.smart_load')
@@ -149,7 +151,7 @@ class TestLayerEndpoint:
         )
         mock_get_tile.return_value = "https://earthengine.googleapis.com/v1/{z}/{x}/{y}"
         
-        response = test_client.get("/api/layers?mode=dna&location=beijing")
+        response = test_client.get("/api/layers?mode=ch2_maowusu_shield&location=maowusu")
         assert response.status_code == 200
         
         data = response.json()
@@ -180,7 +182,7 @@ class TestTileProxyEndpoint:
         mock_get_tile.return_value = "https://earthengine.googleapis.com/v1/tiles/{z}/{x}/{y}"
 
         # 先调用 /api/layers 注册 tile_id
-        layer_resp = test_client.get("/api/layers?mode=dna&location=xiongan")
+        layer_resp = test_client.get("/api/layers?mode=ch2_maowusu_shield&location=maowusu")
         assert layer_resp.status_code == 200
         tile_url = layer_resp.json()["tile_url"]
         m = re.search(r"/api/tiles/(?P<tile_id>[0-9a-f]{24})/\{z\}/\{x\}/(\{y\}|\{reverseY\})$", tile_url)
@@ -199,7 +201,7 @@ class TestTileProxyEndpoint:
         with patch("main.http_client", new=Mock(get=AsyncMock(return_value=upstream_resp))):
             tile_resp = test_client.get(
                 f"/api/tiles/{tile_id}/7/105/48",
-                headers={"Origin": "http://127.0.0.1:8502"},
+                headers={"Origin": "http://127.0.0.1:8504"},
             )
 
         assert tile_resp.status_code == 200
@@ -207,7 +209,7 @@ class TestTileProxyEndpoint:
         assert tile_resp.content.startswith(b"\x89PNG")
 
         # CORS: allow_origins="*" 时通常返回 "*"
-        assert tile_resp.headers.get("access-control-allow-origin") in ("*", "http://127.0.0.1:8502")
+        assert tile_resp.headers.get("access-control-allow-origin") in ("*", "http://127.0.0.1:8504")
 
     @patch("main.ee.Geometry.Point")
     @patch("main.smart_load")
@@ -228,7 +230,7 @@ class TestTileProxyEndpoint:
         )
         mock_get_tile.return_value = "https://earthengine.googleapis.com/v1/tiles/{z}/{x}/{y}"
 
-        layer_resp = test_client.get("/api/layers?mode=dna&location=xiongan")
+        layer_resp = test_client.get("/api/layers?mode=ch2_maowusu_shield&location=maowusu")
         assert layer_resp.status_code == 200
         tile_url = layer_resp.json()["tile_url"]
         m = re.search(r"/api/tiles/(?P<tile_id>[0-9a-f]{24})/\{z\}/\{x\}/(\{y\}|\{reverseY\})$", tile_url)
@@ -276,7 +278,7 @@ class TestTileProxyEndpoint:
         mock_get_tile.return_value = "https://earthengine.googleapis.com/v1/tiles/{z}/{x}/{y}"
 
         # Register tile_id
-        layer_resp = test_client.get("/api/layers?mode=dna&location=xiongan")
+        layer_resp = test_client.get("/api/layers?mode=ch2_maowusu_shield&location=maowusu")
         assert layer_resp.status_code == 200
         tile_url = layer_resp.json()["tile_url"]
         m = re.search(r"/api/tiles/(?P<tile_id>[0-9a-f]{24})/\{z\}/\{x\}/(\{y\}|\{reverseY\})$", tile_url)
@@ -322,12 +324,12 @@ class TestExportEndpoint:
         mock_point.return_value.buffer.return_value = mock_viewport
         
         mock_image = Mock()
-        mock_get_layer.return_value = (mock_image, {'min': 0}, 'change')
+        mock_get_layer.return_value = (mock_image, {'min': 0}, 'ch1_faceid')
         mock_trigger.return_value = "TASK_12345"
         
         payload = {
-            "mode": "change",  # ✅ 使用mode ID而不是完整名称
-            "location": "xiongan"
+            "mode": "ch1_yuhang_faceid",  # ✅ 使用mode ID而不是完整名称
+            "location": "yuhang"
         }
         response = test_client.post("/api/cache/export", json=payload)
         assert response.status_code == 200
@@ -351,7 +353,7 @@ class TestCORSHeaders:
         response = test_client.options(
             "/api/locations",
             headers={
-                "Origin": "http://localhost:8502",
+                "Origin": "http://localhost:8504",
                 "Access-Control-Request-Method": "GET"
             }
         )
@@ -370,6 +372,6 @@ class TestErrorHandling:
         mock_point.return_value.buffer.return_value = mock_viewport
         mock_smart_load.side_effect = Exception("GEE computation failed")
         
-        response = test_client.get("/api/layers?mode=change&location=shanghai")
+        response = test_client.get("/api/layers?mode=ch1_yuhang_faceid&location=yuhang")
         assert response.status_code == 500
         assert "error" in response.json()["detail"]

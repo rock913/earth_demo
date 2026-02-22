@@ -4,7 +4,13 @@
       ref="cesiumViewer"
       :initial-location="initialLocation"
       @viewer-ready="onViewerReady"
+      @map-center-changed="onMapCenterChanged"
     />
+
+    <!-- Debug HUD: map screen-center coordinates (bottom-left) -->
+    <div v-if="viewerReady" class="debug-center">
+      CENTER: {{ mapCenterText }}
+    </div>
 
     <!-- Global exit: Abort & Orbit -->
     <transition name="slide-down">
@@ -134,6 +140,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import CesiumViewer from './components/CesiumViewer.vue'
 import { apiService } from './services/api.js'
+import { formatLatLon } from './utils/coords.js'
 
 export default {
   name: 'App',
@@ -168,6 +175,13 @@ export default {
     // Typewriter / analysis console
     const analysisText = ref('')
     let typeTimer = null
+    let runToken = 0
+
+    // Debug: map center coords
+    const mapCenter = ref({ lat: null, lon: null, ts: null })
+    const mapCenterText = computed(() => {
+      return formatLatLon(mapCenter.value?.lat, mapCenter.value?.lon, 5)
+    })
 
     // AI layer compare controls
     const aiLayerVisible = ref(true)
@@ -230,7 +244,7 @@ export default {
         missions.value = missionsData
       } catch (error) {
         console.error('初始化失败:', error)
-        alert('后端连接失败：请确保 API 服务已启动（默认端口 8503），且前端 /api 代理可用。')
+        alert('后端连接失败：请确保 API 服务已启动（默认端口 8505），且前端 /api 代理可用。')
       }
 
       // keep split bounds in sync with responsive right panel
@@ -271,9 +285,18 @@ export default {
       }
     }
 
+    function onMapCenterChanged(payload) {
+      if (!payload) return
+      mapCenter.value = {
+        lat: payload.lat,
+        lon: payload.lon,
+        ts: payload.ts || Date.now()
+      }
+    }
+
     function normalizeTileUrl(url) {
       if (!url || typeof url !== 'string') return url
-      const apiBase = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8503'
+      const apiBase = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8505'
       if (url.startsWith(apiBase + '/')) {
         return url.slice(apiBase.length)
       }
@@ -285,6 +308,7 @@ export default {
       selectedMissionId.value = mission.id
       selectedLocation.value = mission.location
       selectedMode.value = mission.api_mode
+      runToken += 1
       appState.value = 'flying'
       statusType.value = 'idle'
       statusMsg.value = '目标锁定，正在俯冲...'
@@ -312,9 +336,14 @@ export default {
         // ignore
       }
 
+      const loc = locations.value?.[mission.location]
+      const locCoords = Array.isArray(loc?.coords) ? loc.coords : null
       const cam = mission.camera || {}
-      const lat = cam.lat
-      const lon = cam.lon
+
+      // Prefer /api/locations coords as the single source of truth.
+      // This avoids drift if mission.camera becomes stale.
+      const lat = (locCoords && locCoords.length >= 2) ? Number(locCoords[0]) : Number(cam.lat)
+      const lon = (locCoords && locCoords.length >= 2) ? Number(locCoords[1]) : Number(cam.lon)
       const height = cam.height || 12000
       const duration = cam.duration_s || 3.5
 
@@ -428,10 +457,15 @@ export default {
         `- 将异常占比高的网格列为优先核查清单，并联动 Sentinel-2 影像做目视复核。\n` +
         `- 对持续热点区域建议开展跨期对比，输出“处置-复核-闭环”台账。\n`
 
+      const consensus =
+        `\n【共识印证 Consensus】\n` +
+        `- 本次研判通过统一表征隐空间的量化信号，为“事件叙事”提供可复核的证据锚点。\n` +
+        `- 建议将热点边界与统计结果用于对外沟通与跨部门复核，避免把季节/云影误判为成果或风险。\n`
+
       return (
-        `ONEEARTH/AGENT v5 :: Mission Accepted\n` +
+        `ONEEARTH/AGENT v6 :: Mission Accepted\n` +
         `----------------------------------------\n\n` +
-        observation + algorithm + reasoning + action
+        observation + algorithm + reasoning + action + consensus
       )
     }
 
@@ -441,32 +475,47 @@ export default {
         `- 生成：filterBounds(viewport)+mosaic() 做全视锥拼接；阈值后用 updateMask() 只保留“值得看的像元”；reduceRegion 产出可汇报指标（km²/占比）。\n` +
         `- 速度：smart_load 优先命中预计算 Asset；瓦片同源代理 + 内存 LRU 缓存，保证拖动/缩放不反复打上游。\n`
 
-      if (modeId === 'dna') {
+      if (modeId === 'ch1_yuhang_faceid') {
         return (
           common +
-          `- 地表 DNA：将 A00/A01/A02 作为 RGB 伪彩合成，颜色本身不代表“好/坏”，而代表不同地物在语义空间中的纹理差异。\n` +
-          `  - 颜色越稳定/连片：通常表示同类地物或同一功能区；颜色突变处：更可能是边界、混合地表或人类活动强干预区。\n`
+          `- 第一章·欧氏距离：计算跨期语义距离 $||V_{2017}-V_{2024}||_2$，阈值后仅显示“结构性突变”像元。\n` +
+          `  - 直观含义：城市硬化地表、功能区重写会在隐空间产生显著位移，可作为“城建审计”的量化抓手。\n`
         )
       }
-      if (modeId === 'change') {
+      if (modeId === 'ch2_maowusu_shield') {
         return (
           common +
-          `- 变化雷达：计算跨期语义距离 $||V_{2019}-V_{2024}||_2$，阈值后仅显示“显著变化”像元。\n` +
-          `  - 颜色解读（红→橙→白）：变化强度从“达到阈值”到“极强变化”逐级增强；越接近白色，代表变化幅度越大、优先级越高。\n`
+          `- 第二章·余弦相似度：关注向量方向而非幅度，降低季节性振幅扰动影响；将 $1-\cos(\theta)$ 作为风险得分。\n` +
+          `  - 共识印证：哪怕在秋冬枯黄季节，算法仍能从“语义骨骼”层面确认固沙林已成型，用于粉碎“伪绿化”的质疑。\n`
         )
       }
-      if (modeId === 'intensity') {
+      if (modeId === 'ch3_zhoukou_pulse') {
         return (
           common +
-          `- 建设强度：提取对人造地表敏感的通道（示意：A00），归一化后用阈值只保留中高强度区域。\n` +
-          `  - 颜色解读（黑→蓝→青→白）：由低到高的建设强度梯度；越亮（青/白）通常对应更高密度、更连续的人造地表。\n`
+          `- 第三章·特定维度反演：抽取对农田结构/胁迫敏感的特定维度（示意：A02），归一化后生成可解释的强度场。\n` +
+          `  - 用途：在“看上去都很绿”的麦田中，提前识别内涝/缺氧/倒伏等风险网格，支持粮仓体检与预警。\n`
         )
       }
-      if (modeId === 'eco') {
+      if (modeId === 'ch4_amazon_zeroshot') {
         return (
           common +
-          `- 生态韧性：对生态相关通道（示意：A02）做反演后阈值化，强调“可能胁迫/退化”的空间分布。\n` +
-          `  - 颜色解读（黑→深绿→亮绿→黄绿）：胁迫信号从弱到强；越偏黄绿，代表越需要优先复核与对比多期验证。\n`
+          `- 第四章·零样本聚类：不提供先验标签，直接对隐空间做 K-Means（示意：k=6），自动切分结构单元。\n` +
+          `  - 工程保障：训练样本限定在 training_region（硬编码小缓冲区），避免全域无监督导致 GEE Timeout。\n`
+        )
+      }
+      if (modeId === 'ch5_coastline_audit') {
+        return (
+          common +
+          `- 第五章·海岸线红线审计：抽取 A00/A02 低维语义特征做 K-Means（示意：k=3），将海岸线结构/占用带做快速聚类分区。\n` +
+          `  - 工程保障：训练样本限定在盐城沿海的小矩形 training_region，避免“全视口训练”导致 GEE 计算超时。\n` +
+          `  - 解读建议：将聚类结果与自然岸线/围垦边界/工程岸线矢量叠加，形成“红线核查清单”。\n`
+        )
+      }
+      if (modeId === 'ch6_water_pulse') {
+        return (
+          common +
+          `- 第六章·水网脉动：对水体相关维度（示意：A02）做跨年差分 $\Delta A02 = A02_{2024}-A02_{2022}$，并用 $|\Delta|>0.10$ 掩膜突出显著变化带。\n` +
+          `  - 直观含义：丰枯水位差、支汊连通性与湿地边界波动，会在隐空间维度上形成可追踪的差分信号。\n`
         )
       }
       return common + `- 任务算子：${mission?.formula || '—'}（演示模式说明）。\n`
@@ -498,6 +547,8 @@ export default {
       if (!selectedLocation.value || !selectedMode.value) return
       if (!viewerReady.value || !cesiumViewer.value) return
 
+      const myToken = runToken
+
       const modeId = selectedMode.value
       const modeName = modes.value?.[modeId] || modeId
       loading.value = true
@@ -509,6 +560,7 @@ export default {
       try {
         const cachedLayer = prefetchedLayers.value?.[mission.id]
         const layerData = cachedLayer || (await apiService.getLayer(modeId, selectedLocation.value))
+        if (myToken !== runToken) return
         const url = normalizeTileUrl(layerData.tile_url)
         cesiumViewer.value.loadAILayer(url, 0.88, { fadeIn: true })
         try {
@@ -530,28 +582,41 @@ export default {
         statusType.value = 'success'
         statusMsg.value = `✅ [${modeName}] 图层就绪`
 
-        // Start streaming demo analysis immediately (even if stats/report still computing)
-        analysisText.value = ''
-        _typewriterAppend(
-          _renderAnalysisSections({ mission, modeName, stats: zonalStats.value }),
-          14
-        )
+        // Show a stable placeholder to avoid the console "restarting" multiple times.
+        analysisText.value =
+          `ONEEARTH/AGENT v6 :: Mission Accepted\n` +
+          `----------------------------------------\n\n` +
+          `正在生成智能体分析…（将基于统计指标输出 Observation/Reasoning/Plan/Consensus）\n`
 
         // V5: dynamic zonal stats + brief report
         try {
           const statsResp = await apiService.getStats(modeId, selectedLocation.value)
+          if (myToken !== runToken) return
           zonalStats.value = statsResp?.stats || null
         } catch (e) {
           zonalStats.value = null
         }
 
-        // Re-render with real stats once available
+        // Render analysis ONCE (LLM if available, else deterministic local fallback).
         try {
+          let finalText = ''
+          try {
+            const analysisResp = await apiService.getAnalysis(mission.id, zonalStats.value || undefined)
+            if (myToken !== runToken) return
+            const text = analysisResp?.analysis
+            if (text && typeof text === 'string') {
+              finalText = text
+            }
+          } catch (_) {
+            // ignore
+          }
+
+          if (!finalText) {
+            finalText = _renderAnalysisSections({ mission, modeName, stats: zonalStats.value })
+          }
+
           analysisText.value = ''
-          _typewriterAppend(
-            _renderAnalysisSections({ mission, modeName, stats: zonalStats.value }),
-            14
-          )
+          _typewriterAppend(finalText, 12)
         } catch (_) {
           // ignore
         }
@@ -559,6 +624,7 @@ export default {
         try {
           if (zonalStats.value) {
             const reportResp = await apiService.getReport(mission.id, zonalStats.value)
+            if (myToken !== runToken) return
             reportText.value = reportResp?.report || ''
           } else {
             reportText.value = ''
@@ -708,6 +774,8 @@ export default {
       statusMsg,
       statusType,
       onViewerReady,
+      onMapCenterChanged,
+      mapCenterText,
       lockMission,
       abortAndOrbit,
       toggleAILayer,
@@ -726,6 +794,23 @@ export default {
   height: 100vh;
   position: relative;
   overflow: hidden;
+}
+
+.debug-center {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  z-index: 1600;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(0, 245, 255, 0.22);
+  background: rgba(10, 15, 25, 0.62);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 12px;
+  letter-spacing: 0.6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  user-select: text;
+  pointer-events: none;
 }
 
 /* Optional UI polish: hide Cesium default bottom bar/credits area (PoC demo only). */
@@ -796,11 +881,12 @@ export default {
   letter-spacing: 0.2px;
   margin-bottom: 6px;
   font-size: 16px;
+  line-height: 1.25;
 }
 
 .mission-row {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -811,7 +897,7 @@ export default {
 }
 
 .mission-card {
-  padding: 14px 14px;
+  padding: 16px 14px 14px;
   background: rgba(0, 245, 255, 0.08);
   border: 1px solid rgba(0, 245, 255, 0.25);
   border-radius: 10px;
@@ -821,6 +907,11 @@ export default {
   text-align: left;
   position: relative;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 8px;
+  min-height: 190px;
 }
 
 .mission-card:disabled {
@@ -839,7 +930,7 @@ export default {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
-  margin-bottom: 10px;
+  margin-bottom: 2px;
 }
 
 .tag {
@@ -865,10 +956,11 @@ export default {
   font-size: 13px;
   line-height: 1.5;
   min-height: 54px;
+  flex: 1;
 }
 
 .mission-card-foot {
-  margin-top: 10px;
+  margin-top: 6px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1190,7 +1282,13 @@ export default {
   transform: translateX(40px);
 }
 
-@media (max-width: 980px) {
+@media (max-width: 1180px) {
+  .mission-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
   .mission-row {
     grid-template-columns: 1fr;
   }

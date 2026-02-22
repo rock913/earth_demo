@@ -73,6 +73,18 @@ export const apiService = {
   },
 
   /**
+   * 生成“智能体分析控制台”输出（模板/LLM）
+   */
+  async getAnalysis(mission_id, stats) {
+    const payload = {
+      mission_id
+    }
+    if (stats) payload.stats = stats
+    const { data } = await api.post('/api/analyze', payload)
+    return data
+  },
+
+  /**
    * 触发缓存导出
    */
   async exportCache(mode, location) {

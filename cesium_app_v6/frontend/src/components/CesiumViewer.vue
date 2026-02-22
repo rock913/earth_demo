@@ -25,7 +25,7 @@ export default {
       default: () => ({ lat: 39.0500, lon: 115.9800, height: 15000 })
     }
   },
-  emits: ['viewer-ready', 'camera-moved', 'imagery-error', 'tile-load-progress'],
+  emits: ['viewer-ready', 'camera-moved', 'map-center-changed', 'imagery-error', 'tile-load-progress'],
   
   setup(props, { emit }) {
     const cesiumContainer = ref(null)
@@ -40,6 +40,10 @@ export default {
     let ionBaseProviderUnsub = null
     let rotationTick = null
     let fadeTimer = null
+    let centerTick = null
+    let centerRafPending = false
+    let lastCenterLat = null
+    let lastCenterLon = null
     
     onMounted(() => {
       initViewer()
@@ -61,6 +65,14 @@ export default {
         if (fadeTimer) {
           clearInterval(fadeTimer)
           fadeTimer = null
+        }
+        if (centerTick) {
+          try {
+            viewer.camera.changed.removeEventListener(centerTick)
+          } catch (_) {
+            // ignore
+          }
+          centerTick = null
         }
         viewer.destroy()
       }
@@ -137,7 +149,30 @@ export default {
             lon: Cesium.Math.toDegrees(position.longitude),
             height: position.height
           })
+
+          // Ensure we update map center after any flight/drag ends.
+          try {
+            _emitMapCenter()
+          } catch (_) {
+            // ignore
+          }
         })
+
+        // Real-time "screen center" updates while the user drags/zooms.
+        // Use requestAnimationFrame throttling to avoid spamming Vue.
+        centerTick = () => {
+          if (centerRafPending) return
+          centerRafPending = true
+          try {
+            requestAnimationFrame(() => {
+              centerRafPending = false
+              _emitMapCenter()
+            })
+          } catch (_) {
+            centerRafPending = false
+          }
+        }
+        viewer.camera.changed.addEventListener(centerTick)
 
         // 地形/影像 tile 加载进度（辅助判断是否在持续请求）
         const onTileProgress = (remaining) => {
@@ -166,6 +201,13 @@ export default {
 
         loading.value = false
         emit('viewer-ready', viewer)
+
+        // Initial center emit.
+        try {
+          _emitMapCenter()
+        } catch (_) {
+          // ignore
+        }
 
         // 仍保留第 0 层底图的 error 监听，便于 HUD 定位瓦片失败原因。
         try {
@@ -196,6 +238,40 @@ export default {
         console.error('Cesium初始化失败:', error)
         loadingText.value = '初始化失败: ' + error.message
       }
+    }
+
+    function _emitMapCenter() {
+      if (!viewer) return
+      const canvas = viewer.scene?.canvas
+      if (!canvas) return
+
+      const w = canvas.clientWidth || canvas.width
+      const h = canvas.clientHeight || canvas.height
+      if (!w || !h) return
+
+      const centerPx = new Cesium.Cartesian2(w / 2, h / 2)
+      const ellipsoid = viewer.scene?.globe?.ellipsoid || Cesium.Ellipsoid.WGS84
+      const cartesian = viewer.camera.pickEllipsoid(centerPx, ellipsoid)
+      if (!cartesian) return
+
+      const carto = Cesium.Cartographic.fromCartesian(cartesian)
+      const lat = Cesium.Math.toDegrees(carto.latitude)
+      const lon = Cesium.Math.toDegrees(carto.longitude)
+
+      // Only emit if changed enough (avoid noisy updates).
+      const eps = 1e-6
+      if (
+        lastCenterLat !== null &&
+        lastCenterLon !== null &&
+        Math.abs(lat - lastCenterLat) < eps &&
+        Math.abs(lon - lastCenterLon) < eps
+      ) {
+        return
+      }
+      lastCenterLat = lat
+      lastCenterLon = lon
+
+      emit('map-center-changed', { lat, lon, ts: Date.now() })
     }
     
     /**
@@ -328,16 +404,47 @@ export default {
      */
     function flyTo(location, duration = 3.0, onComplete = null) {
       if (!viewer) return
-      
+
+      const lon = Number(location?.lon)
+      const lat = Number(location?.lat)
+      const range = Number(location?.height || 15000)
+      const headingDeg = (location?.heading_deg === undefined || location?.heading_deg === null)
+        ? 0.0
+        : Number(location.heading_deg)
+      const pitchDeg = (location?.pitch_deg === undefined || location?.pitch_deg === null)
+        ? -45.0
+        : Number(location.pitch_deg)
+
+      // Important: when using a tilted pitch, the camera "destination" is NOT the same as the
+      // "look-at" center. Using flyToBoundingSphere keeps the target coordinate centered.
+      try {
+        const center = Cesium.Cartesian3.fromDegrees(lon, lat, 0.0)
+        const sphere = new Cesium.BoundingSphere(center, 200.0)
+        viewer.camera.flyToBoundingSphere(sphere, {
+          duration: duration,
+          offset: new Cesium.HeadingPitchRange(
+            Cesium.Math.toRadians(headingDeg),
+            Cesium.Math.toRadians(pitchDeg),
+            range
+          ),
+          complete: () => {
+            try {
+              onComplete && onComplete()
+            } catch (_) {
+              // ignore
+            }
+          }
+        })
+        return
+      } catch (_) {
+        // Fallback to plain flyTo if something goes wrong
+      }
+
       viewer.camera.flyTo({
-        destination: Cesium.Cartesian3.fromDegrees(
-          location.lon,
-          location.lat,
-          location.height || 15000
-        ),
+        destination: Cesium.Cartesian3.fromDegrees(lon, lat, range),
         orientation: {
-          heading: Cesium.Math.toRadians(0.0),
-          pitch: Cesium.Math.toRadians(-45.0),
+          heading: Cesium.Math.toRadians(headingDeg),
+          pitch: Cesium.Math.toRadians(pitchDeg),
           roll: 0.0
         },
         duration: duration,

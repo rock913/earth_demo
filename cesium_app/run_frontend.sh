@@ -24,5 +24,5 @@ if [ ! -d "node_modules" ]; then
 fi
 
 # 启动前端
-echo "✅ Frontend starting on http://127.0.0.1:${FRONTEND_PORT:-8502}"
-npm run dev -- --port ${FRONTEND_PORT:-8502}
+echo "✅ Frontend starting on http://0.0.0.0:${FRONTEND_PORT:-8502} (remote: http://47.245.113.151:${FRONTEND_PORT:-8502})"
+npm run dev -- --host 0.0.0.0 --port ${FRONTEND_PORT:-8502}
